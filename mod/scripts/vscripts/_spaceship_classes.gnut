@@ -1,0 +1,482 @@
+/*
+** Read this to understand how classes work in squirrel:
+** https://r2northstar.readthedocs.io/en/latest/native/class.html
+*/
+
+untyped
+global var Spaceship // This is the class! DON'T PUT ANYTHING ELSE IN THIS!
+
+global function SpaceShipClassesInit
+
+// table to get the corresponding instance of a prop
+global table< entity, var> spaceships
+
+struct {
+	entity w1
+} SpaceshipWeapons
+
+const FX_FAR_FORWARD_EXPLOSION = $"droppod_impact_black"
+const FX_FORWARD_EXPLOSION = $"P_exp_redeye_sml_elec"
+const FIRE_TRAIL = $"Rocket_Smoke_Swirl_LG"
+
+const FX_MEGA_TURRET_IMPACT_SMOKE = $"impact_exp_bomber_smoke1"
+const FX_MEGA_TURRECT_IMPACT_EXPLOSION = $"P_impact_exp_XLG_air"
+
+const FX_GOBLIN_DEATH_SIDE = $"P_veh_exp_goblin_HS"
+const FX_GOBLIN_DEATH = $"P_veh_exp_crow"
+
+const SPACESHIP_MAX_LANDING_HEIGHT = 400
+
+void function SpaceShipClassesInit()
+{
+	//Precache fx
+	PrecacheParticleSystem( FX_HORNET_DEATH ) // Wrong plane parts
+	PrecacheParticleSystem( FX_FAR_FORWARD_EXPLOSION )
+	PrecacheParticleSystem( FX_FORWARD_EXPLOSION ) // Explosion forward movement thing
+	PrecacheParticleSystem( FIRE_TRAIL )
+	PrecacheParticleSystem( FX_MEGA_TURRET_IMPACT_SMOKE )
+	PrecacheParticleSystem( FX_MEGA_TURRECT_IMPACT_EXPLOSION )
+	PrecacheParticleSystem( FX_GOBLIN_DEATH )
+
+	// add a property to the player class to store their ship
+	CPlayer.spaceship <- null
+
+	class Spaceship {
+		// ship.GetOwner() for pilot
+		config = null // table			| config data for different spaceship types
+		ship = null // CDynamicProp		| holds the ingame prop of the ship
+		mover = null // script_mover	| moves the player, prop and helper
+		engineOn = false // boolean		| controls if the spaceship is allowed to move
+		moveTime = 0.5 // float			| time of the mover to move to the next point
+		inManeuver = false // boolean	| true if the ship is landing / starting <> replace this with signals maybe
+		freeView = false // boolean		| true when the player is not changing directions with view
+		moveSlow = false // boolean		| move slowly, still very janky
+		// health = 250 // int				| hitpoints of the ship prop
+
+		helper = null // CAI_BaseNPC	| helper npc that owns the weapon of this ship
+		weapon = null // CWeaponX		| weapon of the helper npc
+
+		startManeuverTime = 1.5
+		landingManeuverTime = 1.5
+		
+		constructor( string type = "straton", var origin = <0,0,0>, var angles = <0,0,0> )
+		{
+			expect vector( origin )
+			expect vector( angles )
+
+			this.config = this.ConfigFromType( type )
+
+			// create the ship prop
+			this.ship = CreateEntity( "prop_script" )
+			this.ship.SetValueForModelKey( expect asset( this.config.model ) )
+			this.ship.SetAngles( angles )
+			this.ship.SetOrigin( origin + < 0, 0, expect float( this.config.groundToFeet ) > )
+			this.ship.kv.solid = SOLID_VPHYSICS
+			AddEntityCallback_OnDamaged( expect entity( this.ship ), OnShipDamaged )
+			DispatchSpawn( expect entity( this.ship ) )
+
+			this.ship.SetScriptName( UniqueString( "ship" ) )
+
+			this.ship.SetMaxHealth( expect int( this.config.health ) )
+			this.ship.SetHealth( expect int( this.config.health ) )
+
+			this.SetShipFree()
+
+			AddCallback_OnUseEntity( expect entity( this.ship ), OnShipUsed)
+
+			// create the ship mover
+			vector shipAngles = expect vector( this.ship.EyeAngles() )
+			this.mover = CreateExpensiveScriptMover( origin, <0, shipAngles.y, shipAngles.z> )
+
+			this.ship.SetParent( this.mover )
+
+			spaceships[expect entity( this.ship )] <- this
+
+			// create ship weapon reference
+			this.weapon = SpaceshipWeapons.w1
+
+			thread this.MoveShip()
+			thread this.RotateShip()
+
+			// create a weapon and it's helper
+
+			// Projectiles move from the middle of the helper ent to the given missile origin for some reason? fuck respawn honestly
+			// helper origin height offset should probably be calculated by their bounding box
+			// also I need to find a way to make the helper not fucking move. Using a marvin for now because he doesn't have ADHS like most other ents
+
+			vector helperOrigin = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * expect float( this.config.cannonPosFactor ) )
+				+ AnglesToUp( expect vector( this.ship.GetAngles() ) ) * ( expect float( this.config.cannonHeightOffset ) - 30 )
+
+			// When being killed, the killfeed displays "Marvin" as the killer
+			// I need to look into damage structs etc to figure out if I can override this
+			entity guy = CreateMarvin(TEAM_UNASSIGNED, helperOrigin, <0,0,0>)
+			guy.SetParent( expect entity( this.mover ) )
+			guy.Hide()
+			HideName( guy )
+			// guy.SetNameVisibleToNeutral( false )
+			guy.Freeze() // make this mf keep still. Fixes the ADHS issues of entities
+			DispatchSpawn( guy )
+			guy.ReplaceActiveWeapon("mp_weapon_arena2")
+
+			this.helper = guy
+			this.weapon = guy.GetMainWeapons()[0]
+		}
+
+		function ShootMainWeapon() {
+			vector shipAngles = expect vector( this.ship.GetAngles() )
+			vector cannonOrigin =  expect vector( this.ship.GetOrigin()
+				+ this.ship.GetForwardVector() * expect float( this.config.cannonPosFactor ) )
+				+ AnglesToUp( shipAngles ) * expect float( this.config.cannonHeightOffset )
+
+			this.weapon.FireWeaponMissile(
+			cannonOrigin,
+			AnglesToForward( shipAngles ),
+			1.0, damageTypes.largeCaliberExp, damageTypes.largeCaliberExp, true, PROJECTILE_NOT_PREDICTED )
+		}
+
+		function SetShipFree() /* void */
+		{
+			this.ship.SetUsableByGroup( "pilot" )
+			this.ship.SetUsePrompts( "Press %use% to enter", "Press %use% to enter")
+		}
+
+		function SetShipOccupied() /* void */
+		{
+			this.ship.UnsetUsable()
+			// printt( this.ship.GetOwner() )
+			// this.ship.SetUsableByGroup( "owner pilot" )
+			// this.ship.SetUsePrompts( "Press %use% to exit", "Press %use% to exit")
+		}
+
+		function Embark( /* CPlayer */ var player ) // void
+		{
+			expect entity( player )
+			this.ship.SetOwner( player )
+			player.spaceship = this
+
+			player.DisableWeaponViewModel()
+
+			vector shipAngles = expect vector( this.ship.EyeAngles() )
+			vector shipOrigin = expect vector( this.ship.GetOrigin() )
+			player.SetAngles(<0,shipAngles.y,shipAngles.z>)
+			vector shipFwd = expect vector( this.ship.GetForwardVector() )
+
+			// vector tmp = expect vector( this.mover.GetAngles() )
+			// this.mover.SetAngles(<0,0,0>)
+			// player.SetOrigin( <shipOrigin.x + 120, shipOrigin.y, shipOrigin.z + 40> )
+			// this.mover.SetAngles(tmp)
+
+			vector af = AnglesToForward( shipAngles )
+			float forwardCorrection = expect float( this.config.cockpitForwardCorrection )
+			float upwardCorrection = expect float( this.config.cockpitUpwardCorrection )
+
+			player.SetOrigin( shipOrigin + af * forwardCorrection + 
+				(player.CameraPosition() - player.GetOrigin()) + <0,0,upwardCorrection> )
+			player.SetAngles( shipAngles )
+			// player.SetOrigin( shipOrigin + shipFwd * 120 + <0,0,40> )
+			// player.SetOrigin( <shipOrigin.x + shipFwd.x + 120, shipOrigin.y + shipFwd.y, shipOrigin.z + shipFwd.z + 40> )
+			player.SetParent( this.mover )
+			player.ForceStand()
+
+			AddButtonPressedPlayerInputCallback( player, IN_JUMP , OnJumpInput ) // starting / landing
+			AddButtonPressedPlayerInputCallback( player, IN_DUCK , OnExitUsed ) // exiting
+			AddButtonPressedPlayerInputCallback( player, IN_ZOOM , OnFreeViewPressed ) // freeview start
+			AddButtonReleasedPlayerInputCallback( player, IN_ZOOM, OnFreeViewReleased ) // freeview end
+			AddButtonPressedPlayerInputCallback( player, IN_BACK, OnMoveSlowPressed ) // move slow start
+			AddButtonReleasedPlayerInputCallback( player, IN_BACK, OnMoveSlowReleased ) // move slow end
+
+			/*
+				better idea would be to make a set of custom weapons / abilities and give them to the player when embarking
+				figure out if it's possible to make weapons that only trigger a signal
+				also need to figure out signals for this
+			*/
+			AddButtonPressedPlayerInputCallback( player, IN_ATTACK, OnAttackPressed ) // ship attack
+
+			this.SetShipOccupied()
+		}
+
+		function Disembark() /* void */
+		{
+			entity player = expect entity( this.ship.GetOwner() )
+			player.spaceship = null
+
+			player.ClearParent()
+			player.UnforceStand()
+			this.ship.GetOwner().EnableWeaponViewModel()
+
+			if( this.engineOn )
+				this.Eject()
+
+			this.ship.SetOwner( null )
+			this.SetShipFree()
+
+			DeregisterAllButtons( player )
+
+		}
+
+		function Eject() /* void */
+		{
+			entity player = expect entity( this.ship.GetOwner() )
+			player.SetVelocity( player.GetVelocity() + <0,0,1000> )
+		}
+
+		function MoveShip() /* void */
+		{
+			while ( IsValid( expect entity( this.ship ) ) )
+			{
+				if ( this.engineOn )
+				{
+					float moveTime = expect float( this.config.moveTime )
+					if ( this.moveSlow )
+						moveTime = moveTime * 2
+					vector moveTo = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * 500 )
+
+					this.mover.NonPhysicsMoveTo( moveTo, moveTime , 0, 0.2 )
+				}
+				wait 0.1
+			}
+		}
+
+		function RotateShip() /* void */
+		{
+			// entity prop
+			while( IsValid( expect entity( this.ship ) ) ) {
+				if ( !this.ship || !this.mover || !this.ship.GetOwner() || !this.engineOn || this.freeView )
+				{
+					WaitFrame()
+					continue
+				} else if ( IsValid( expect entity( this.ship ) ) ) 
+				{
+					vector v = expect vector( this.ship.GetOwner().EyeAngles() )
+					v = <v.x,v.y,0>
+
+					// move for 0.5 seconds to account for higher ping maybe?
+					// with a lower move time the view sometimes starts "stuttering"
+					this.mover.NonPhysicsRotateTo(v, 0.3, 0, 0)
+
+					vector moveTo = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * 500 )
+					// if ( !prop ) {
+					// 	prop = CreatePropDynamic( RODEO_BATTERY_MODEL_FOR_RODEO_ANIMS, expect vector( this.ship.GetOwner().GetOrigin() + AnglesToForward( v ) * 500 ) )
+					// }
+					// else {
+					// 	prop.SetOrigin(  expect vector( this.ship.GetOwner().GetOrigin() + AnglesToForward( v ) * 500 ) )
+					// }
+
+					// actually rotate every 0.01 seconds
+					// this means that the player waits for 0.1 seconds before moving!
+					wait 0.01
+				}
+			}
+		}
+
+		function StartingSequence() /* void */
+		{
+			if ( this.inManeuver )
+				return
+
+			this.mover.NonPhysicsMoveTo(
+				expect vector( this.ship.GetOrigin() + <0,0,200> ),
+				expect float( this.startManeuverTime ), 0.5,0.5 )
+
+			thread void function() {
+				this.inManeuver = true
+				wait expect float( this.startManeuverTime )
+				this.engineOn = true
+			}()
+
+			this.inManeuver = false
+
+		}
+
+		function LandingSequence( /* vector */ landingSpot) /* void */
+		{
+			if ( this.inManeuver )
+				return
+
+			this.engineOn = false
+
+			vector distant = expect vector( this.ship.GetOrigin() ) + expect vector( this.ship.GetForwardVector() ) * 500
+			float t = expect float( this.config.moveTime )
+			this.mover.NonPhysicsMoveTo( distant, t, 0, t )
+			// this.mover.NonPhysicsMoveTo(
+			// 	expect vector( landingSpot ), t, 0, 0 ) // moving is controlled by movers and they can't move for 0 secs
+			vector angles = expect vector( this.mover.GetAngles() )
+			this.mover.RotateTo(<0,angles.y,0>, expect float( this.landingManeuverTime ), t / 3, t / 3 )
+
+			thread void function( float t, vector landingSpot ) {
+				this.inManeuver = true
+				wait t + 0.5
+				this.mover.NonPhysicsMoveTo( landingSpot, expect float( this.landingManeuverTime ), t / 3, t / 3 )
+				wait t
+			}( t, expect vector( landingSpot ) )
+
+			this.inManeuver = false
+		}
+
+		function ConfigFromType( string type )
+		{
+			var config = {} // fml. Can't use structs and tables because untyped is shit
+			switch( type ) {
+				case "goblin":
+					config.model <- $"models/vehicle/goblin_dropship/goblin_dropship_hero.mdl"
+					config.cockpitForwardCorrection <- 310.0
+					config.cockpitUpwardCorrection <- -120.0
+					config.cannonPosFactor <- 250.0
+					config.cannonHeightOffset <- 40.0
+					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
+					config.health <- 500
+					config.moveTime <- 0.7
+					config.groundToFeet <- 100.0
+				break
+				case "crow":
+					config.model <- $"models/vehicle/crow_dropship/crow_dropship_hero.mdl"
+					config.cockpitForwardCorrection <- 270.0
+					config.cockpitUpwardCorrection <- -85.0
+					config.cannonPosFactor <- 250.0
+					config.cannonHeightOffset <- 40.0
+					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
+					config.health <- 500
+					config.moveTime <- 1.0
+					config.groundToFeet <- 100.0
+				break
+				case "straton":
+				default:
+					config.model <- $"models/vehicle/straton/straton_imc_gunship_01.mdl"
+					config.cockpitForwardCorrection <- 120.0
+					config.cockpitUpwardCorrection <- -20.0
+					config.cannonPosFactor <- 250.0
+					config.cannonHeightOffset <- 40.0
+					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
+					config.health <- 250
+					config.moveTime <- 0.5
+					config.groundToFeet <- 0.0
+				break
+			}
+			return config
+		}
+	}
+}
+
+void function OnShipDamaged( entity ship, var damageInfo )
+{
+	if ( !IsValid( ship ) )
+		return
+
+	// ship.Destroy()
+
+	int damageSourceID = DamageInfo_GetDamageSourceIdentifier( damageInfo )
+	entity attacker = DamageInfo_GetAttacker( damageInfo )
+	float damageAmount = DamageInfo_GetDamage( damageInfo )
+
+	if ( !damageSourceID && !damageAmount && !attacker )
+		return
+
+
+	float newHealth = ship.GetHealth() - damageAmount
+	ship.SetHealth( newHealth )
+
+	if( newHealth <= 0 )
+	{
+		ship.ClearParent()
+		var spaceship = spaceships[ ship ]
+		if( spaceship.ship.GetOwner() )
+		{
+			spaceship.ship.GetOwner().ClearParent()
+			spaceship.Disembark()
+		}
+		spaceship.helper.Destroy()
+		spaceship.weapon.Destroy()
+		spaceship.mover.Destroy()
+
+		PlayFX( FX_MEGA_TURRECT_IMPACT_EXPLOSION,  ship.GetOrigin() /* + < 0, 0, expect float( spaceships[ ship ].config.groundToFeet ) > */ )
+	}
+}
+
+var function OnShipUsed( var prop, var player )
+{
+	expect entity( prop )
+	var spaceship = spaceships[prop]
+
+	spaceship.ship.SetOwner( player )
+	spaceship.Embark( player )
+}
+
+void function OnExitUsed( entity player )
+{
+	if ( !this.player.spaceship )
+		return
+
+	var spaceship = player.spaceship
+	if ( spaceship )
+		player.spaceship.Disembark()
+}
+
+void function OnJumpInput( entity player )
+{
+	if ( !this.player.spaceship )
+		return
+
+	if ( player.spaceship.engineOn )
+	{
+		TraceResults results = TraceLandingSpot( expect entity( player.spaceship.ship ) )
+		if ( results.hitEnt && results.hitEnt.IsWorld() )
+			player.spaceship.LandingSequence( results.endPos + <0,0,5> )
+	}
+	else
+		player.spaceship.StartingSequence()
+}
+
+void function OnFreeViewPressed( entity player )
+{
+	if ( this.player.spaceship )
+		this.player.spaceship.freeView = true
+}
+
+void function OnFreeViewReleased( entity player )
+{
+	if ( this.player.spaceship )
+		this.player.spaceship.freeView = false
+}
+
+void function OnMoveSlowPressed( entity player )
+{
+	player.spaceship.moveSlow = true
+}
+
+void function OnMoveSlowReleased( entity player )
+{
+	player.spaceship.moveSlow = false
+}
+
+void function OnAttackPressed( entity player )
+{
+	printt( player.tostring() + " attacked in spaceship " + player.spaceship.tostring() )
+	// player.spaceship.weapon.FireWeaponMissile(
+	// 	expect vector( player.spaceship.ship.GetOrigin() + player.spaceship.ship.GetForwardVector() * 500 ),
+	// 	expect vector( player.spaceship.ship.GetAngles() ),
+	// 	1.0, damageTypes.largeCaliberExp, damageTypes.largeCaliberExp, true, PROJECTILE_NOT_PREDICTED )
+
+	// Attack2( player.spaceship )
+
+	player.spaceship.ShootMainWeapon()
+}
+
+TraceResults function TraceLandingSpot( entity shipProp )
+{
+	vector distant = shipProp.GetOrigin() + shipProp.GetForwardVector() * 500
+	vector traceStart = shipProp.GetOrigin()
+	vector traceEnd = distant - < 0, 0, SPACESHIP_MAX_LANDING_HEIGHT >
+
+	return TraceLine( distant, traceEnd, null, TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE )
+}
+
+void function DeregisterAllButtons( entity player )
+{
+	RemoveButtonPressedPlayerInputCallback( player, IN_JUMP , OnJumpInput )
+	RemoveButtonPressedPlayerInputCallback( player, IN_DUCK , OnExitUsed )
+	RemoveButtonPressedPlayerInputCallback( player, IN_ZOOM , OnFreeViewPressed )
+	RemoveButtonReleasedPlayerInputCallback( player, IN_ZOOM, OnFreeViewReleased )
+	RemoveButtonPressedPlayerInputCallback( player, IN_BACK, OnMoveSlowPressed )
+	RemoveButtonReleasedPlayerInputCallback( player, IN_BACK, OnMoveSlowReleased )
+	RemoveButtonPressedPlayerInputCallback( player, IN_ATTACK, OnAttackPressed )
+}
