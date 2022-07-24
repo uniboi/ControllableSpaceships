@@ -11,10 +11,6 @@ global function SpaceShipClassesInit
 // table to get the corresponding instance of a prop
 global table< entity, var> spaceships
 
-struct {
-	entity w1
-} SpaceshipWeapons
-
 const FX_FAR_FORWARD_EXPLOSION = $"droppod_impact_black"
 const FX_FORWARD_EXPLOSION = $"P_exp_redeye_sml_elec"
 const FIRE_TRAIL = $"Rocket_Smoke_Swirl_LG"
@@ -92,9 +88,6 @@ void function SpaceShipClassesInit()
 
 			spaceships[expect entity( this.ship )] <- this
 
-			// create ship weapon reference
-			this.weapon = SpaceshipWeapons.w1
-
 			thread this.MoveShip()
 			thread this.RotateShip()
 
@@ -143,9 +136,6 @@ void function SpaceShipClassesInit()
 		function SetShipOccupied() /* void */
 		{
 			this.ship.UnsetUsable()
-			// printt( this.ship.GetOwner() )
-			// this.ship.SetUsableByGroup( "owner pilot" )
-			// this.ship.SetUsePrompts( "Press %use% to exit", "Press %use% to exit")
 		}
 
 		function Embark( /* CPlayer */ var player ) // void
@@ -254,14 +244,6 @@ void function SpaceShipClassesInit()
 					// with a lower move time the view sometimes starts "stuttering"
 					this.mover.NonPhysicsRotateTo(v, 0.3, 0, 0)
 
-					vector moveTo = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * 500 )
-					// if ( !prop ) {
-					// 	prop = CreatePropDynamic( RODEO_BATTERY_MODEL_FOR_RODEO_ANIMS, expect vector( this.ship.GetOwner().GetOrigin() + AnglesToForward( v ) * 500 ) )
-					// }
-					// else {
-					// 	prop.SetOrigin(  expect vector( this.ship.GetOwner().GetOrigin() + AnglesToForward( v ) * 500 ) )
-					// }
-
 					// actually rotate every 0.01 seconds
 					// this means that the player waits for 0.1 seconds before moving!
 					wait 0.01
@@ -321,8 +303,8 @@ void function SpaceShipClassesInit()
 					config.model <- $"models/vehicle/goblin_dropship/goblin_dropship_hero.mdl"
 					config.cockpitForwardCorrection <- 310.0
 					config.cockpitUpwardCorrection <- -120.0
-					config.cannonPosFactor <- 250.0
-					config.cannonHeightOffset <- 40.0
+					config.cannonPosFactor <- 315.0
+					config.cannonHeightOffset <- -70.0
 					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
 					config.health <- 500
 					config.moveTime <- 0.7
@@ -403,7 +385,7 @@ var function OnShipUsed( var prop, var player )
 
 void function OnExitUsed( entity player )
 {
-	if ( !this.player.spaceship )
+	if ( !player.spaceship )
 		return
 
 	var spaceship = player.spaceship
@@ -413,7 +395,7 @@ void function OnExitUsed( entity player )
 
 void function OnJumpInput( entity player )
 {
-	if ( !this.player.spaceship )
+	if ( !player.spaceship )
 		return
 
 	if ( player.spaceship.engineOn )
@@ -428,14 +410,14 @@ void function OnJumpInput( entity player )
 
 void function OnFreeViewPressed( entity player )
 {
-	if ( this.player.spaceship )
-		this.player.spaceship.freeView = true
+	if ( player.spaceship )
+		player.spaceship.freeView = true
 }
 
 void function OnFreeViewReleased( entity player )
 {
-	if ( this.player.spaceship )
-		this.player.spaceship.freeView = false
+	if ( player.spaceship )
+		player.spaceship.freeView = false
 }
 
 void function OnMoveSlowPressed( entity player )
@@ -450,14 +432,6 @@ void function OnMoveSlowReleased( entity player )
 
 void function OnAttackPressed( entity player )
 {
-	printt( player.tostring() + " attacked in spaceship " + player.spaceship.tostring() )
-	// player.spaceship.weapon.FireWeaponMissile(
-	// 	expect vector( player.spaceship.ship.GetOrigin() + player.spaceship.ship.GetForwardVector() * 500 ),
-	// 	expect vector( player.spaceship.ship.GetAngles() ),
-	// 	1.0, damageTypes.largeCaliberExp, damageTypes.largeCaliberExp, true, PROJECTILE_NOT_PREDICTED )
-
-	// Attack2( player.spaceship )
-
 	player.spaceship.ShootMainWeapon()
 }
 
