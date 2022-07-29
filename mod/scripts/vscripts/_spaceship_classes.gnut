@@ -23,8 +23,28 @@ const FX_GOBLIN_DEATH = $"P_veh_exp_crow"
 
 const SPACESHIP_MAX_LANDING_HEIGHT = 400
 
+const SPACESHIP_WEAPON_PROJECTILE = "mp_weapon_epg"
+const SPACESHIP_WEAPON_HITSCAN = "mp_weapon_g2"
+
+const ALTERNATOR_SMG_TRACER_FX = $"weapon_tracers_xo16_speed"
+
 void function SpaceShipClassesInit()
 {
+	// Precache models
+	PrecacheModel($"models/vehicle/straton/straton_imc_gunship_01.mdl")
+	PrecacheModel($"models/vehicle/crow_dropship/crow_dropship_hero.mdl")
+	PrecacheModel($"models/vehicle/goblin_dropship/goblin_dropship_hero.mdl")
+	PrecacheModel($"models/vehicle/escape_pod/escape_pod.mdl")
+	// PrecacheModel($"models/vehicle/straton/straton_imc_gunship_01.mdl" // hornet
+	// PrecacheModel($"models/vehicle/capital_ship_annapolis/annapolis.mdl")
+	// PrecacheModel($"models/vehicle/capital_ship_Birmingham/birmingham_fleetScale.mdl")
+	// PrecacheModel($"models/vehicle/imc_bomber/bomber.mdl")
+	PrecacheModel($"models/vehicle/draconis/vehicle_draconis_hero_animated.mdl")
+	// PrecacheModel($"models/vehicle/imc_carrier/vehicle_imc_carrier207_stage1.mdl")
+	// PrecacheModel($"models/vehicle/imc_carrier/vehicle_imc_carrier.mdl")
+	// PrecacheModel($"models/vehicle/redeye/redeye2.mdl")
+	PrecacheModel($"models/vehicle/widow/widow.mdl")
+
 	//Precache fx
 	PrecacheParticleSystem( FX_HORNET_DEATH ) // Wrong plane parts
 	PrecacheParticleSystem( FX_FAR_FORWARD_EXPLOSION )
@@ -52,10 +72,17 @@ void function SpaceShipClassesInit()
 		helper = null // CAI_BaseNPC	| helper npc that owns the weapon of this ship
 		weapon = null // CWeaponX		| weapon of the helper npc
 
+		mainWeaponIndex = 0 // int
+
+		/*	REPLACE WITH CUSTOM WEAPONS & SIGNALS	*/
+		isFiring = false 
+		/**//**//**//**//**//**//**//**//**//**//**/
+
 		startManeuverTime = 1.5
 		landingManeuverTime = 1.5
 		
-		constructor( string type = "straton", var origin = <0,0,0>, var angles = <0,0,0> )
+		// ships can't be damaged by a ship of the same team. Also applies to TEAM_UNSASSIGNED
+		constructor( string type = "straton", var origin = <0,0,0>, var angles = <0,0,0>, team = TEAM_UNASSIGNED )
 		{
 			expect vector( origin )
 			expect vector( angles )
@@ -68,7 +95,9 @@ void function SpaceShipClassesInit()
 			this.ship.SetAngles( angles )
 			this.ship.SetOrigin( origin + < 0, 0, expect float( this.config.groundToFeet ) > )
 			this.ship.kv.solid = SOLID_VPHYSICS
+			// this.ship.SetArmorType( ARMOR_TYPE_HEAVY )
 			AddEntityCallback_OnDamaged( expect entity( this.ship ), OnShipDamaged )
+
 			DispatchSpawn( expect entity( this.ship ) )
 
 			this.ship.SetScriptName( UniqueString( "ship" ) )
@@ -90,6 +119,7 @@ void function SpaceShipClassesInit()
 
 			thread this.MoveShip()
 			thread this.RotateShip()
+			thread this.ShootWeaponsThread()
 
 			// create a weapon and it's helper
 
@@ -97,34 +127,75 @@ void function SpaceShipClassesInit()
 			// helper origin height offset should probably be calculated by their bounding box
 			// also I need to find a way to make the helper not fucking move. Using a marvin for now because he doesn't have ADHS like most other ents
 
-			vector helperOrigin = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * expect float( this.config.cannonPosFactor ) )
-				+ AnglesToUp( expect vector( this.ship.GetAngles() ) ) * ( expect float( this.config.cannonHeightOffset ) - 30 )
+			// right now the helper blocks all incoming damage
+			vector helperOrigin = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * expect float( this.config.mainWeaponSystems[0].cannonPosForward ) )
+				+ AnglesToUp( expect vector( this.ship.GetAngles() ) ) * ( expect float( this.config.mainWeaponSystems[0].cannonPosUp ) - 30 )
 
 			// When being killed, the killfeed displays "Marvin" as the killer
 			// I need to look into damage structs etc to figure out if I can override this
-			entity guy = CreateMarvin(TEAM_UNASSIGNED, helperOrigin, <0,0,0>)
+			// entity guy = CreateMarvin( TEAM_UNASSIGNED, helperOrigin, angles )
+			entity guy = CreateMarvin( TEAM_UNASSIGNED, <0,0,0>, <0,0,0> )
 			guy.SetParent( expect entity( this.mover ) )
 			guy.Hide()
+			guy.SetTakeDamageType( DAMAGE_NO )
+			guy.kv.CollisionGroup = TRACE_COLLISION_GROUP_NONE
 			HideName( guy )
-			// guy.SetNameVisibleToNeutral( false )
 			guy.Freeze() // make this mf keep still. Fixes the ADHS issues of entities
 			DispatchSpawn( guy )
-			guy.ReplaceActiveWeapon("mp_weapon_arena2")
+			// guy.ReplaceActiveWeapon("mp_weapon_arena2")
+			guy.ReplaceActiveWeapon( expect string( this.config.mainWeapon ) )
 
 			this.helper = guy
 			this.weapon = guy.GetMainWeapons()[0]
+
+			// thread void function() {
+			// 	while( IsValid( this.ship ) )
+			// 	{
+			// 		this.ShootMainWeapon()
+			// 		wait 0.1
+			// 	}
+			// }()
 		}
 
-		function ShootMainWeapon() {
-			vector shipAngles = expect vector( this.ship.GetAngles() )
-			vector cannonOrigin =  expect vector( this.ship.GetOrigin()
-				+ this.ship.GetForwardVector() * expect float( this.config.cannonPosFactor ) )
-				+ AnglesToUp( shipAngles ) * expect float( this.config.cannonHeightOffset )
+		function SetMainWeaponHelperPosition()
+		{
+			vector helperOrigin = expect vector( this.ship.GetOrigin() + this.ship.GetForwardVector() * expect float( this.config.mainWeaponSystems[ this.mainWeaponIndex ].cannonPosForward ) )
+				+ AnglesToUp( expect vector( this.ship.GetAngles() ) ) * ( expect float( this.config.mainWeaponSystems[ this.mainWeaponIndex ].cannonPosUp ) - 30 )
+			this.helper.SetOrigin( helperOrigin )
 
-			this.weapon.FireWeaponMissile(
-			cannonOrigin,
-			AnglesToForward( shipAngles ),
-			1.0, damageTypes.largeCaliberExp, damageTypes.largeCaliberExp, true, PROJECTILE_NOT_PREDICTED )
+			if( this.config.mainWeaponSystems.len() && this.mainWeaponIndex < this.config.mainWeaponSystems.len() - 1 )
+				this.mainWeaponIndex++
+			else
+				this.mainWeaponIndex = 0
+		}
+
+		function ShootWeaponsThread()
+		{
+			while( IsValid( this.ship ) )
+			{
+				if( this.isFiring )
+					this.ShootMainWeapon()
+				wait expect float( this.config.mainWeaponCooldown )
+			}
+		}
+
+		function ShootMainWeapon()
+		{
+			// this.SetMainWeaponHelperPosition()
+
+			vector shipAngles = expect vector( this.ship.GetAngles() )
+			vector cannonOrigin = expect vector( this.ship.GetOrigin()
+				+ this.ship.GetForwardVector() * expect float( this.config.mainWeaponSystems[ this.mainWeaponIndex ].cannonPosForward )
+				+ this.ship.GetRightVector() * expect float( this.config.mainWeaponSystems[ this.mainWeaponIndex ].cannonPosRight )
+				+ AnglesToUp( shipAngles ) * expect float( this.config.mainWeaponSystems[ this.mainWeaponIndex ].cannonPosUp ) )
+
+			ShootShipWeapon( expect entity( this.weapon ), cannonOrigin, AnglesToForward( shipAngles ), expect vector( this.ship.GetForwardVector() ) )
+		
+			if( this.config.mainWeaponSystems.len() )
+				if( this.mainWeaponIndex < this.config.mainWeaponSystems.len() - 1 )
+					this.mainWeaponIndex++
+				else
+					this.mainWeaponIndex = 0
 		}
 
 		function SetShipFree() /* void */
@@ -181,8 +252,15 @@ void function SpaceShipClassesInit()
 				also need to figure out signals for this
 			*/
 			AddButtonPressedPlayerInputCallback( player, IN_ATTACK, OnAttackPressed ) // ship attack
+			AddButtonReleasedPlayerInputCallback( player, IN_ATTACK, OnAttackReleased ) // ship attack
 
 			this.SetShipOccupied()
+
+			Remote_CallFunction_NonReplay( player, "CreateHealthBar", this.ship.GetEncodedEHandle() )
+			AddDeathCallback( "player", OnPilotDeath )
+
+			this.ship.Code_SetTeam( player.GetTeam() )
+			this.helper.Code_SetTeam( player.GetTeam() )
 		}
 
 		function Disembark() /* void */
@@ -194,7 +272,7 @@ void function SpaceShipClassesInit()
 			player.UnforceStand()
 			this.ship.GetOwner().EnableWeaponViewModel()
 
-			if( this.engineOn )
+			if( this.engineOn && IsValid( player ) )
 				this.Eject()
 
 			this.ship.SetOwner( null )
@@ -202,6 +280,11 @@ void function SpaceShipClassesInit()
 
 			DeregisterAllButtons( player )
 
+			Remote_CallFunction_NonReplay( player, "DestroyHealthBar" )
+			RemoveDeathCallback( "player", OnPilotDeath )
+
+			this.ship.Code_SetTeam( TEAM_UNASSIGNED )
+			this.helper.Code_SetTeam( TEAM_UNASSIGNED )
 		}
 
 		function Eject() /* void */
@@ -256,6 +339,8 @@ void function SpaceShipClassesInit()
 			if ( this.inManeuver )
 				return
 
+			this.mover.ClearParent()
+
 			this.mover.NonPhysicsMoveTo(
 				expect vector( this.ship.GetOrigin() + <0,0,200> ),
 				expect float( this.startManeuverTime ), 0.5,0.5 )
@@ -300,38 +385,80 @@ void function SpaceShipClassesInit()
 			var config = {} // fml. Can't use structs and tables because untyped is shit
 			switch( type ) {
 				case "goblin":
+					table barrel = {
+						cannonPosForward = 315.0
+						cannonPosRight = 0.0
+						cannonPosUp = -70.0
+					}
+
 					config.model <- $"models/vehicle/goblin_dropship/goblin_dropship_hero.mdl"
 					config.cockpitForwardCorrection <- 310.0
 					config.cockpitUpwardCorrection <- -120.0
 					config.cannonPosFactor <- 315.0
-					config.cannonHeightOffset <- -70.0
+					config.cannonPosUp <- -70.0
 					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
-					config.health <- 500
+					config.health <- 800
 					config.moveTime <- 0.7
 					config.groundToFeet <- 100.0
+					config.mainWeapon <- SPACESHIP_WEAPON_PROJECTILE
+					config.mainWeaponSystems <- [ barrel ]
+					config.mainWeaponCooldown <- 0.6
 				break
 				case "crow":
+					table barrel = {
+						cannonPosForward = 300.0
+						cannonPosRight = 0.0
+						cannonPosUp = -50.0
+					}
+
 					config.model <- $"models/vehicle/crow_dropship/crow_dropship_hero.mdl"
 					config.cockpitForwardCorrection <- 270.0
 					config.cockpitUpwardCorrection <- -85.0
-					config.cannonPosFactor <- 250.0
-					config.cannonHeightOffset <- 40.0
+					config.cannonPosFactor <- 300.0
+					config.cannonPosUp <- -50.0
 					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
 					config.health <- 500
 					config.moveTime <- 1.0
 					config.groundToFeet <- 100.0
+					config.mainWeapon <- SPACESHIP_WEAPON_PROJECTILE
+					config.mainWeaponSystems <- [ barrel ]
+					config.mainWeaponCooldown <- 0.3
 				break
 				case "straton":
 				default:
+					table barrel1 = {
+						cannonPosForward = 250.0
+						cannonPosRight = 22.5
+						cannonPosUp = 40.0
+					}
+					table barrel2 = {
+						cannonPosForward = 250.0
+						cannonPosRight = 22.5
+						cannonPosUp = 32.5
+					}
+					table barrel3 = {
+						cannonPosForward = 250.0
+						cannonPosRight = -22.5
+						cannonPosUp = 40.0
+					}
+					table barrel4 = {
+						cannonPosForward = 250.0
+						cannonPosRight = -22.5
+						cannonPosUp = 32.5
+					}
+			
 					config.model <- $"models/vehicle/straton/straton_imc_gunship_01.mdl"
 					config.cockpitForwardCorrection <- 120.0
 					config.cockpitUpwardCorrection <- -20.0
 					config.cannonPosFactor <- 250.0
-					config.cannonHeightOffset <- 40.0
+					config.cannonPosUp <- 40.0
 					config.explosions <- [ FX_MEGA_TURRECT_IMPACT_EXPLOSION ]
-					config.health <- 250
+					config.health <- 300
 					config.moveTime <- 0.5
 					config.groundToFeet <- 0.0
+					config.mainWeapon <- SPACESHIP_WEAPON_HITSCAN
+					config.mainWeaponSystems <- [ barrel1, barrel2, barrel3, barrel4 ]
+					config.mainWeaponCooldown <- 0.2
 				break
 			}
 			return config
@@ -372,6 +499,8 @@ void function OnShipDamaged( entity ship, var damageInfo )
 
 		PlayFX( FX_MEGA_TURRECT_IMPACT_EXPLOSION,  ship.GetOrigin() /* + < 0, 0, expect float( spaceships[ ship ].config.groundToFeet ) > */ )
 	}
+
+	// Remote_CallFunction_NonReplay( GetPlayerArray()[0], "Server_SetSpaceshipHealthBar", newHealth )
 }
 
 var function OnShipUsed( var prop, var player )
@@ -401,8 +530,12 @@ void function OnJumpInput( entity player )
 	if ( player.spaceship.engineOn )
 	{
 		TraceResults results = TraceLandingSpot( expect entity( player.spaceship.ship ) )
-		if ( results.hitEnt && results.hitEnt.IsWorld() )
+		// if ( results.hitEnt && results.hitEnt.IsWorld() )
+		if ( results.hitEnt )
+		{
 			player.spaceship.LandingSequence( results.endPos + <0,0,5> )
+			player.spaceship.mover.SetParent( results.hitEnt )
+		}
 	}
 	else
 		player.spaceship.StartingSequence()
@@ -432,7 +565,19 @@ void function OnMoveSlowReleased( entity player )
 
 void function OnAttackPressed( entity player )
 {
-	player.spaceship.ShootMainWeapon()
+	// player.spaceship.ShootMainWeapon()
+	player.spaceship.isFiring = true
+}
+
+void function OnAttackReleased( entity player )
+{
+	player.spaceship.isFiring = false
+	
+}
+
+void function OnPilotDeath( entity player, var damageInfo )
+{
+	player.spaceship.Disembark()
 }
 
 TraceResults function TraceLandingSpot( entity shipProp )
@@ -440,6 +585,8 @@ TraceResults function TraceLandingSpot( entity shipProp )
 	vector distant = shipProp.GetOrigin() + shipProp.GetForwardVector() * 500
 	vector traceStart = shipProp.GetOrigin()
 	vector traceEnd = distant - < 0, 0, SPACESHIP_MAX_LANDING_HEIGHT >
+
+	printt( TraceLine( distant, traceEnd, null, TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE ).endPos )
 
 	return TraceLine( distant, traceEnd, null, TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE )
 }
@@ -453,4 +600,50 @@ void function DeregisterAllButtons( entity player )
 	RemoveButtonPressedPlayerInputCallback( player, IN_BACK, OnMoveSlowPressed )
 	RemoveButtonReleasedPlayerInputCallback( player, IN_BACK, OnMoveSlowReleased )
 	RemoveButtonPressedPlayerInputCallback( player, IN_ATTACK, OnAttackPressed )
+	RemoveButtonReleasedPlayerInputCallback( player, IN_ATTACK, OnAttackReleased )
+}
+
+void function ShootShipWeapon( entity weapon, vector origin, vector dir, vector shipForward = <0,0,0> )
+{
+	switch( weapon.GetWeaponClassName() )
+	{
+		case SPACESHIP_WEAPON_PROJECTILE:
+			weapon.FireWeaponMissile(
+				origin,
+				dir,
+				1.0, damageTypes.largeCaliberExp, damageTypes.largeCaliberExp, true, PROJECTILE_NOT_PREDICTED )
+		break
+		case SPACESHIP_WEAPON_HITSCAN:
+			weapon.FireWeaponBullet( origin, dir, 1, DF_BULLET )
+					vector traceEnd = origin + shipForward * 56756 
+					TraceResults r = TraceLine( origin, traceEnd, [], TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE )
+					// CreateWeaponTracer(origin, r.endPos, 1.0, $"P_wpn_tracer_sniper_BC")
+					// CreateWeaponTracer(origin, r.endPos, 0.25, $"P_wpn_defender_beam")
+					CreateWeaponTracer(origin, r.endPos, 0.25, $"P_wpn_tracer_xo16_elec")
+		break;
+	}
+}
+
+void function CreateWeaponTracer( vector startPos, vector endPos, float lifeDuration, asset tracerAsset = $"P_wpn_tracer" )
+{
+	entity cpEnd = CreateEntity( "info_placement_helper" )
+	cpEnd.SetOrigin( endPos )
+	SetTargetName( cpEnd, UniqueString( "arc_cannon_beam_cpEnd" ) )
+	DispatchSpawn( cpEnd )
+
+	entity tracer = CreateEntity( "info_particle_system" )
+	tracer.kv.cpoint1 = cpEnd.GetTargetName()
+
+	tracer.SetValueForEffectNameKey( tracerAsset )
+
+	tracer.kv.start_active = 0
+	tracer.SetOrigin( startPos )
+
+	DispatchSpawn( tracer )
+
+	tracer.Fire( "Start" )
+	tracer.Fire( "StopPlayEndCap", "", lifeDuration )
+	tracer.Kill_Deprecated_UseDestroyInstead( lifeDuration )
+	cpEnd.Kill_Deprecated_UseDestroyInstead( lifeDuration )
+
 }
